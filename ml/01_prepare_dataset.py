@@ -38,6 +38,8 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 ROBOFLOW_SUFFIX = re.compile(r"\.rf\.[0-9a-fA-F]+$")
 CLASS_COLORS = {"besar": "#F57C00", "sedang": "#1976D2", "kecil": "#388E3C"}
 UNKNOWN_COLOR = "#D32F2F"
+# Tags TFLite Model Maker 0.4.3 reads from every <object> (create_pascal_tfrecord.dict_to_tf_example).
+MODEL_MAKER_OBJECT_TAGS = ("name", "difficult", "truncated", "pose")
 
 
 @dataclass(frozen=True)
@@ -62,6 +64,8 @@ class Box:
     ymin: float
     xmax: float
     ymax: float
+    missing_tags: tuple[str, ...] = ()
+    integer_coords: bool = True
 
 
 @dataclass
@@ -72,6 +76,7 @@ class Sample:
     group: str
     width: int | None = None
     height: int | None = None
+    xml_filename: str | None = None
     boxes: list[Box] = field(default_factory=list)
 
 
@@ -111,13 +116,16 @@ def parse_voc(xml_path: Path) -> tuple[int | None, int | None, list[Box], str | 
         bnd = obj.find("bndbox")
         if bnd is None:
             continue
+        raw = [bnd.findtext(tag) for tag in ("xmin", "ymin", "xmax", "ymax")]
         boxes.append(
             Box(
-                label=(obj.findtext("name") or "").strip(),
-                xmin=float(bnd.findtext("xmin")),
-                ymin=float(bnd.findtext("ymin")),
-                xmax=float(bnd.findtext("xmax")),
-                ymax=float(bnd.findtext("ymax")),
+                label=obj.findtext("name") or "",
+                xmin=float(raw[0]),
+                ymin=float(raw[1]),
+                xmax=float(raw[2]),
+                ymax=float(raw[3]),
+                missing_tags=tuple(tag for tag in MODEL_MAKER_OBJECT_TAGS if obj.find(tag) is None),
+                integer_coords=all(re.fullmatch(r"\s*-?\d+\s*", value) for value in raw),
             )
         )
     return width, height, boxes, root.findtext("filename")
@@ -141,7 +149,7 @@ def collect_samples(split: str, split_dir: Path, issues: list[Issue]) -> list[Sa
             issues.append(Issue(split, image_path.name, "image_without_xml", "tidak ada berkas XML"))
         else:
             try:
-                sample.width, sample.height, sample.boxes, _ = parse_voc(xml_path)
+                sample.width, sample.height, sample.boxes, sample.xml_filename = parse_voc(xml_path)
             except (ET.ParseError, TypeError, ValueError) as error:
                 issues.append(Issue(split, xml_path.name, "xml_unreadable", str(error)))
         if image_path is None:
@@ -155,6 +163,8 @@ def validate_sample(sample: Sample, limits: Thresholds, issues: list[Issue]) -> 
     if sample.image_path is not None:
         with Image.open(sample.image_path) as image:
             real_w, real_h = ImageOps.exif_transpose(image).size
+            image_format = image.format
+        _validate_model_maker_image(sample, image_format, issues, name)
         if sample.width is not None and (real_w, real_h) != (sample.width, sample.height):
             issues.append(
                 Issue(sample.split, name, "size_mismatch",
@@ -168,11 +178,24 @@ def validate_sample(sample: Sample, limits: Thresholds, issues: list[Issue]) -> 
     _flag_duplicate_boxes(sample, limits, issues, name)
 
 
+def _validate_model_maker_image(sample: Sample, image_format: str | None, issues: list[Issue], name: str) -> None:
+    """Model Maker opens images_dir/<xml filename> and accepts JPEG only."""
+    if image_format != "JPEG":
+        issues.append(Issue(sample.split, name, "mm_not_jpeg", f"format {image_format}"))
+    if sample.xml_path is not None and sample.xml_filename != sample.image_path.name:
+        issues.append(Issue(sample.split, name, "mm_filename_mismatch",
+                            f"<filename>{sample.xml_filename}</filename> vs berkas {sample.image_path.name}"))
+
+
 def _validate_box(sample: Sample, box: Box, limits: Thresholds, issues: list[Issue], name: str) -> None:
     if box.label not in VALID_LABELS:
         kind = "label_case" if box.label.lower() in VALID_LABELS else "label_unknown"
         issues.append(Issue(sample.split, name, kind, f"label '{box.label}'"))
     coords = f"({box.xmin:g},{box.ymin:g},{box.xmax:g},{box.ymax:g})"
+    if box.missing_tags:
+        issues.append(Issue(sample.split, name, "mm_missing_tag", f"objek tanpa tag {', '.join(box.missing_tags)}"))
+    if not box.integer_coords:
+        issues.append(Issue(sample.split, name, "mm_non_integer_box", coords))
     if box.xmax <= box.xmin or box.ymax <= box.ymin:
         issues.append(Issue(sample.split, name, "box_degenerate", coords))
         return
@@ -390,7 +413,8 @@ def render_markdown(report: dict) -> str:
     if report["issues_by_kind"]:
         lines += ["| Jenis | Jumlah |", "|---|---|"]
         lines += [f"| {kind} | {n} |" for kind, n in sorted(report["issues_by_kind"].items())]
-        lines.append("\nRincian per berkas: `issues.csv`.")
+        lines.append("\nRincian per berkas: `issues.csv`. Jenis `mm_*` membuat TFLite Model Maker gagal membaca "
+                     "data dan harus diperbaiki sebelum training.")
     else:
         lines.append("Tidak ada masalah terdeteksi dengan ambang di `thresholds`.")
     lines += ["", "## 3. Kebocoran data antar split", ""]
