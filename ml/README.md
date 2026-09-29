@@ -9,7 +9,11 @@ di repo (lihat `.gitignore`); semuanya tinggal di Google Drive.
 | `ANNOTATION_GUIDE.md` | Panduan anotasi objektif 3 kelas | selesai (ambang non-PRD masih usulan) |
 | `01_prepare_dataset.py` | Audit read-only split Roboflow: validasi anotasi, kebocoran, hitungan, heuristik latar, contact sheet | selesai, diuji dengan data sintetis |
 | `tests/test_prepare_dataset.py` | Unit test skrip audit | selesai |
-| `02_train_efficientdet.ipynb` | Transfer learning EfficientDet-Lite0 (BiFPN) dari COCO | **menunggu persetujuan toolchain** |
+| `02_train_efficientdet.ipynb` | Transfer learning EfficientDet-Lite0 (BiFPN) dari COCO, resumable | selesai ditulis; **PERLU DIJALANKAN DI COLAB** |
+| `train_efficientdet.py` | Logika training (dipanggil notebook; Python 3.9) | selesai, lulus uji asap CPU |
+| `run_py39.sh` | Menjalankan skrip di lingkungan Python 3.9 + pustaka CUDA 11 | selesai |
+| `requirements-train.in` / `.txt` | Pin tingkat atas / lockfile lengkap lingkungan training | selesai |
+| `tests/smoke_train_pipeline.py` | Uji asap pipeline training (data sintetis, bobot acak, CPU) | selesai |
 | `03_…` evaluasi, ekspor, `evaluate_counting` | Butir 5–7 | sesi berikutnya |
 
 ## 1. Dataset
@@ -64,7 +68,10 @@ dataset_udang/
    **PERLU DIJALANKAN DI COLAB** — dataset tidak tersedia di lingkungan pengembangan.
 4. Kirim `report.md` (dan lihat kedua contact sheet) sebelum training. Bila ada masalah, perbaikannya
    (mis. split ulang berbasis kelompok) diusulkan dulu dan **tidak** dilakukan otomatis.
-5. Training: `02_train_efficientdet.ipynb` — ditulis setelah toolchain disetujui.
+5. Training: buka `ml/02_train_efficientdet.ipynb` di Colab (File → Open notebook → GitHub), ubah hanya sel
+   *Konfigurasi*, lalu *Run all*. Notebook menjalankan ulang audit dan berhenti bila ada masalah pemblokir.
+   Setelah Colab terputus: *Run all* lagi → training melanjutkan dari `ckpt-<epoch>` terakhir di Drive.
+   Jangan mengubah `EPOCHS`/`BATCH_SIZE`/`LEARNING_RATE` di tengah eksperimen (jadwal LR bergantung pada total langkah).
 
 ## 3. Versi yang dipin
 
@@ -73,16 +80,46 @@ Hanya pustaka standar Python + `numpy` + `Pillow`. Diuji di lingkungan pengemban
 Python 3.11.15, numpy 2.4.6, Pillow 12.3.0. Di Colab, versi bawaan dipakai dan dicatat otomatis di
 `report.json` → `environment` (agar tidak memaksa restart runtime).
 
-### Training
-Belum dipin — menunggu keputusan toolchain (lihat `docs/DECISIONS.md`, D-010).
+### Training — `requirements-train.in` (pin tingkat atas) → `requirements-train.txt` (lockfile)
+| Paket | Versi | Alasan |
+|---|---|---|
+| Python | 3.9 (dibuat dengan `uv venv -p 3.9`) | `scann==1.2.6` (dependensi Model Maker) hanya punya wheel cp37–cp39 |
+| tflite-model-maker | 0.4.3 | rilis terakhir |
+| tensorflow | 2.8.4 | `scann==1.2.6` mensyaratkan `tensorflow~=2.8.0` |
+| tensorflow-addons | 0.17.1 | mendukung TF 2.7–2.9 |
+| typeguard | 2.13.3 | tensorflow-addons 0.17 rusak dengan typeguard ≥ 3 |
+| pycocotools | 2.0.7 | metrik COCO (dipakai Model Maker, tidak ikut terdeklarasi) |
+| numpy | 1.23.3 | batas Model Maker `<1.23.4` |
+| nvidia-*-cu11 | CUDA runtime 11.8.89, cuDNN 8.6.0.163, cuBLAS 11.11.3.6, cuFFT 10.9.0.58, cuRAND 10.3.0.86, cuSOLVER 11.4.1.48, cuSPARSE 11.7.5.86 | pustaka GPU untuk TF 2.8 (dimuat lewat `run_py39.sh`) |
 
-## 4. Menjalankan test skrip audit
+Lockfile dibuat ulang dengan:
+`uv pip compile ml/requirements-train.in --python-version 3.9 --python-platform x86_64-manylinux_2_28 -o ml/requirements-train.txt`
+
+### Yang sudah diverifikasi di lingkungan pengembangan (CPU, tanpa dataset asli)
+- Lockfile terpasang di Python 3.9.23; `import tflite_model_maker` berhasil setelah `libusb-1.0-0` sistem dipasang.
+- Kedelapan pustaka CUDA yang dicari TF 2.8 (`libcudart.so.11.0`, `libcublas(Lt).so.11`, `libcufft.so.10`,
+  `libcurand.so.10`, `libcusolver.so.11`, `libcusparse.so.11`, `libcudnn.so.8`) ada dan termuat lewat `run_py39.sh`.
+- `tests/smoke_train_pipeline.py` lulus: pembacaan VOC → training 2 epoch → checkpoint → resume ke epoch 3 dari
+  `ckpt-2` (optimizer step 8) → pemangkasan checkpoint → evaluasi validasi → run selesai dilewati.
+  Memakai bobot acak dan data sintetis; metriknya tidak bermakna dan tidak dilaporkan.
+
+### Belum terverifikasi → PERLU DIJALANKAN DI COLAB
+- Deteksi GPU oleh TF 2.8 dengan driver Colab (sel 4 notebook gagal dengan pesan jelas bila tidak).
+- Unduhan bobot COCO dari `tfhub.dev` (diblokir proxy di lingkungan pengembangan). Bila gagal di Colab:
+  unduh arsip model `efficientdet/lite0/feature-vector` versi 1 secara manual, ekstrak ke Drive, lalu isi
+  `HUB_URI` di sel Konfigurasi dengan path folder tersebut.
+- Determinisme GPU (`enable_op_determinism`); bila ada op yang menolak, set `DETERMINISTIC = False` dan catat.
+
+## 4. Menjalankan test
 ```bash
 pip install -r ml/requirements-audit.txt
-python -m unittest discover -s ml/tests -v
+python -m unittest discover -s ml/tests -v          # skrip audit (Python ≥ 3.10)
+
+uv venv -p 3.9 /tmp/py39 && uv pip install -p /tmp/py39/bin/python -r ml/requirements-train.txt
+VANNAMESCAN_PY39_ENV=/tmp/py39 ml/run_py39.sh ml/tests/smoke_train_pipeline.py /tmp/smoke   # uji asap training
 ```
 
-## 5. Pemilihan toolchain training (USULAN — menunggu persetujuan)
+## 5. Pemilihan toolchain training (DISETUJUI 2026-09-29 — D-010)
 
 Diverifikasi 2026-09-29 dari PyPI dan halaman GitHub resmi:
 
@@ -93,24 +130,27 @@ Diverifikasi 2026-09-29 dari PyPI dan halaman GitHub resmi:
 | TF Object Detection API | **Deprecated** (README: tidak lagi dipelihara untuk dependensi baru) | EfficientDet D0 (bukan Lite) | Kuantisasi INT8 EfficientDet D0 dikenal bermasalah | Manual | Ya, `export_tflite_graph_tf2 --max_detections` |
 | TF-Vision (Model Garden) | Aktif | **Tidak ada EfficientDet/BiFPN** | — | — | — |
 
-**Usulan:** Model Maker 0.4.3 dalam lingkungan Python 3.9 terisolasi (micromamba/conda di Colab GPU),
-dengan cadangan google/automl bila instalasi gagal.
+**Dipilih:** Model Maker 0.4.3 dalam lingkungan Python 3.9 terisolasi (dibuat dengan `uv`, CUDA dari wheel
+`nvidia-*-cu11`), dengan cadangan google/automl bila instalasi gagal.
 
 Alasan: satu-satunya jalur yang langsung menghasilkan persis kontrak PRD D.7 — EfficientDet-Lite0 (BiFPN,
 pretrained COCO), INT8, metadata + label tertanam (kompatibel `ObjectDetector`), dan batas deteksi bisa
 dinaikkan ke 100.
 
 Risiko:
-1. Toolchain tidak lagi dipelihara; lingkungan Python lama harus dibangun manual di Colab (≈10–15 menit per
-   sesi, perlu dicache ke Drive). Kombinasi versi TensorFlow/CUDA yang pasti jalan belum terbukti →
-   **PERLU DIJALANKAN DI COLAB** sebagai sel uji asap sebelum training penuh.
-2. Model Maker mengunduh bobot COCO dari TF Hub (kini dialihkan ke Kaggle Models); URL bisa berubah.
-3. Resume setelah Colab terputus: Model Maker menyimpan checkpoint ke `model_dir`, tetapi melanjutkan
-   epoch (bukan mulai ulang) perlu diverifikasi; bila tidak didukung, notebook memakai loop per-blok epoch
-   dengan pemuatan checkpoint terakhir.
-4. Augmentasi bawaan Model Maker/automl: flip horizontal acak + scale jitter; akan didokumentasikan apa adanya
-   dan tidak ditambah augmentasi offline.
-5. Runtime TFLite yang dihasilkan lama; kompatibilitas dengan LiteRT di app diuji di Fase 7 app.
+1. Toolchain tidak lagi dipelihara; lingkungan Python 3.9 dibangun ulang tiap sesi Colab (sel 3 notebook).
+   GPU di Colab belum terbukti (lihat "Belum terverifikasi").
+2. Bobot COCO dari TF Hub (kini dialihkan ke Kaggle Models); URL bisa berubah. Cache disimpan di Drive.
+3. Resume: Model Maker sendiri tidak mendukung resume. `train_efficientdet.py` menurunkan
+   `EfficientDetModelSpec.train` dengan fungsi yang sama ditambah pemuatan `ckpt-<epoch>` terakhir (bobot + state
+   optimizer) dan `initial_epoch`. Terbukti di uji asap CPU.
+4. Augmentasi online: flip horizontal saja; scale jitter bawaan (0,1–2,0) **dimatikan** karena mengubah ukuran
+   udang di citra, padahal ukuran itulah dasar kelas (D-014).
+5. Model Maker diam-diam membuang kotak ground-truth di atas `max_instances_per_image` (default 100); skrip
+   menolak training bila ada gambar melebihi batas itu.
+6. Model Maker membaca gambar dari tag `<filename>` XML, hanya menerima JPEG, dan mewajibkan tag `difficult`,
+   `truncated`, `pose` di tiap objek; skrip audit memeriksa semuanya (`mm_*`).
+7. Runtime TFLite yang dihasilkan lama; kompatibilitas dengan LiteRT di app diuji di Fase 7 app.
 
 ## 6. Aturan
 - Jangan commit dataset, checkpoint, log, atau `.tflite` mentah. Satu-satunya `.tflite` yang boleh masuk repo

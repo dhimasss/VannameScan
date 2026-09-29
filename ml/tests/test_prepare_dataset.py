@@ -18,17 +18,21 @@ sys.modules[spec.name] = prep
 spec.loader.exec_module(prep)
 
 
-def write_voc(folder: Path, stem: str, size=(100, 80), boxes=(), color="white", write_image=True):
+MM_TAGS = "<difficult>0</difficult><truncated>0</truncated><pose>Unspecified</pose>"
+
+
+def write_voc(folder: Path, stem: str, size=(100, 80), boxes=(), color="white", write_image=True,
+              object_tags=MM_TAGS, xml_filename=None, image_format="JPEG"):
     folder.mkdir(parents=True, exist_ok=True)
     if write_image:
-        Image.new("RGB", size, color).save(folder / f"{stem}.jpg")
+        Image.new("RGB", size, color).save(folder / f"{stem}.jpg", format=image_format)
     objects = "".join(
-        f"<object><name>{label}</name><bndbox><xmin>{x0}</xmin><ymin>{y0}</ymin>"
+        f"<object><name>{label}</name>{object_tags}<bndbox><xmin>{x0}</xmin><ymin>{y0}</ymin>"
         f"<xmax>{x1}</xmax><ymax>{y1}</ymax></bndbox></object>"
         for label, x0, y0, x1, y1 in boxes
     )
     (folder / f"{stem}.xml").write_text(
-        f"<annotation><filename>{stem}.jpg</filename><size><width>{size[0]}</width>"
+        f"<annotation><filename>{xml_filename or stem + '.jpg'}</filename><size><width>{size[0]}</width>"
         f"<height>{size[1]}</height><depth>3</depth></size>{objects}</annotation>"
     )
 
@@ -48,6 +52,25 @@ class IouTest(unittest.TestCase):
 
     def test_disjoint_boxes(self):
         self.assertEqual(prep.iou(prep.Box("besar", 0, 0, 10, 10), prep.Box("kecil", 20, 20, 30, 30)), 0.0)
+
+
+class ModelMakerCompatibilityTest(unittest.TestCase):
+    def test_flags_inputs_model_maker_cannot_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            train = Path(tmp) / "dataset" / "train"
+            write_voc(train, "ok_jpg.rf.1", boxes=[("besar", 10, 10, 40, 40)])
+            write_voc(train, "notags_jpg.rf.2", boxes=[("besar", 10, 10, 40, 40)], object_tags="")
+            write_voc(train, "rename_jpg.rf.3", boxes=[("besar", 10, 10, 40, 40)], xml_filename="other.jpg")
+            write_voc(train, "png_jpg.rf.4", boxes=[("besar", 10, 10, 40, 40)], image_format="PNG")
+            write_voc(train, "float_jpg.rf.5", boxes=[("besar", 10.5, 10, 40, 40)])
+            report = prep.audit(Path(tmp) / "dataset", Path(tmp) / "out", 30, 1, prep.Thresholds())
+        by_file = {(i["kind"], i["file"]) for i in report["issues"] if i["kind"].startswith("mm_")}
+        self.assertEqual(by_file, {
+            ("mm_missing_tag", "notags_jpg.rf.2.jpg"),
+            ("mm_filename_mismatch", "rename_jpg.rf.3.jpg"),
+            ("mm_not_jpeg", "png_jpg.rf.4.jpg"),
+            ("mm_non_integer_box", "float_jpg.rf.5.jpg"),
+        })
 
 
 class AuditTest(unittest.TestCase):
