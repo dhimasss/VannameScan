@@ -1,0 +1,40 @@
+# --- ML track: never commit datasets, checkpoints, logs or raw models ---
+ml/**/data/
+ml/**/dataset*/
+ml/**/runs/
+ml/**/checkpoints/
+ml/**/exports/
+ml/**/audit_out/
+ml/**/*.xml
+ml/**/*.jpg
+ml/**/*.jpeg
+ml/**/*.png
+*.tflite
+# The single released model shipped with the app (PRD D.7) is the only allowed .tflite.
+!app/src/main/assets/shrimp_detector.tflite
+*.ckpt*
+checkpoint
+*.pb
+*.h5
+*.keras
+*.tfrecord
+*.tfrecord-*
+events.out.tfevents.*
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+
+# Android / Gradle
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
